@@ -1,3 +1,4 @@
+#include "main.h"
 #include <stdio.h>
 #include <string.h>
 #include <pthread.h>
@@ -7,6 +8,8 @@
 #include <stdlib.h>
 #include <semaphore.h>
 
+
+volatile sig_atomic_t done = 0;
 sem_t sem_read, sem_analyze, sem_print;
 pthread_t reader_thread;
 pthread_t analyzer_thread;
@@ -16,9 +19,8 @@ double* core_usage;
 char** cpu_data;
 int core_amount;
 
-volatile sig_atomic_t done = 0;
 
-void term(int signum){
+void term(){
     done = 1;
     pthread_cancel(reader_thread);
     pthread_cancel(analyzer_thread);
