@@ -8,133 +8,145 @@
 #include <stdlib.h>
 #include <semaphore.h>
 
-
 volatile sig_atomic_t done = 0;
-sem_t sem_read, sem_analyze, sem_print;
-pthread_t reader_thread;
-pthread_t analyzer_thread;
-pthread_t printer_thread;
+static sem_t sem_read, sem_analyze, sem_print;
+static pthread_t reader_thread;
+static pthread_t analyzer_thread;
+static pthread_t printer_thread;
+static pthread_t watchdog_thread;
 
-double* core_usage;
-char** cpu_data;
-int core_amount;
+static double* core_usage;
+static char** cpu_data;
+static long core_amount;
+static int working = 0;
 
-
-void term(){
+static void term(int signo){
     done = 1;
     pthread_cancel(reader_thread);
     pthread_cancel(analyzer_thread);
     pthread_cancel(printer_thread);
+    pthread_cancel(watchdog_thread);
+    printf("signal %d received\n",signo);
     free(core_usage);
-    for(int i = 0; i <core_amount; i++) {
+    for(int i = 0; i < core_amount; i++) {
         free(cpu_data[i]);
     }
     free(cpu_data);
 }
 
-void* reader() {
+void* reader(void* unused) {       
     while (1) {
-        sem_wait(&sem_read);
-        int n = sysconf(_SC_NPROCESSORS_ONLN);
         FILE *stat_file = fopen("/proc/stat", "r");
+        (void)unused;
+        sem_wait(&sem_read);
+        core_amount = sysconf(_SC_NPROCESSORS_ONLN);
+
         if (stat_file == NULL) {
             assert(stat_file==NULL);          
         }
 
-        for(int i = 0; i < n; i++) {
+        for(int i = 0; i < core_amount; i++) {
             if (fgets(cpu_data[i], 1024, stat_file) != NULL) {
                 if (strncmp(cpu_data[i], "cpu", 3) == 0) {
                 } else break;
             }
         }
         fclose(stat_file);
+        working = 1;
         sem_post(&sem_analyze);
     }
 
     return NULL;
 }
 
-void* analyzer() {
-
-    long long a =0;
-    long long b=0;
+void* analyzer(void* unused) {
+    int cpu_nr, user, nice, system, idle, iowait, irq, softirq, steal;
+    long long a = 0;
+    long long b = 0;
     core_amount = sysconf(_SC_NPROCESSORS_ONLN);
+    (void)unused;
     while (1) {
         sem_wait(&sem_analyze);
-        int cpu_nr, user, nice, system, idle, iowait, irq, softirq, steal;
         for( int i =0; i<core_amount;i++){
             sscanf(cpu_data[i], "cpu %d %d %d %d %d %d %d %d %d",&cpu_nr, &user, &nice, &system, &idle, &iowait, &irq, &softirq, &steal);
             a =(user + nice + system + irq + softirq + steal);
             b =(user + nice + system + idle + iowait + irq + softirq + steal) ;
             core_usage[i]=(double)a/(double)b * 100.0;
         }
-        sem_post(&sem_print);   
+    working = 1;
+    sem_post(&sem_print);
+}
+return NULL;
+}
+
+void* printer(void* unused){
+double avg_cpu = 0;
+(void)unused;
+while (1){
+    sem_wait(&sem_print);
+
+    for( int i =1; i<=core_amount;i++){
+        avg_cpu += core_usage[i];
     }
-        
-    return NULL;
+    avg_cpu /= (double)core_amount;
+    printf("Total CPU usage: %f%%\n", avg_cpu);
+    avg_cpu = 0;
+    sleep(1);
+    working = 1;
+    sem_post(&sem_read);
+  }
+return NULL;
 }
 
-void* printer() {
-
-    while (1) {
-        sem_wait(&sem_print);
-        double avg_cpu = 0 ;      
-        for( int i =1; i<=core_amount;i++){
-            avg_cpu += core_usage[1];
+static void* watchdog(void* unused){
+    (void)unused;
+    while(1){
+        sleep(2);
+        if(!working){
+        printf("Error: All threads have stopped working.\n");
+        term(SIGTERM);
+        exit(EXIT_FAILURE);
         }
-        avg_cpu /=core_amount;
-        printf("Total CPU usage: %f%%\n", avg_cpu);
-        avg_cpu = 0 ;
-
-        sleep(1);
-        sem_post(&sem_read);
-      }
-
-    return NULL;
+        working = 0;
+    }
+return NULL;
 }
-int main() {
 
+int main(void){
+    struct sigaction action;
     sem_init(&sem_read, 0, 1);
     sem_init(&sem_analyze, 0, 0);
     sem_init(&sem_print, 0, 0);
 
-    int core_amount = sysconf(_SC_NPROCESSORS_ONLN);
-    core_usage = (double*) malloc(core_amount * sizeof(double));
-    if(core_usage == NULL){printf("Memory unavaiable");
-        return 1;
-    }
-    cpu_data = (char**) malloc(core_amount * sizeof(char*));
-    if(cpu_data == NULL){
-        printf("Memory unavaiable");
-        free(core_usage);
-        return 1;
-    }
-    for(int i = 0; i <core_amount; i++) {
+    core_amount = sysconf(_SC_NPROCESSORS_ONLN);
+    core_usage = (double*) malloc((unsigned long)core_amount * sizeof(double));
+    cpu_data = (char**) malloc((unsigned long)core_amount * sizeof(char*));
+    for(int i = 0; i < core_amount; i++){
         cpu_data[i] = (char*) malloc(1024 * sizeof(char));
-        if(cpu_data[i] == NULL){
-            printf("Memory unavaiable");
-            free(core_usage);
-            for(int j = 0; j < i; j++) {
-                free(cpu_data[j]);
-            }
-            free(cpu_data);
-            return 1;
-        }
     }
 
-    struct sigaction action;
-    memset(&action, 0, sizeof(struct sigaction));
     action.sa_handler = term;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = 0;
+    sigaction(SIGINT, &action, NULL);
     sigaction(SIGTERM, &action, NULL);
-        
+
     pthread_create(&reader_thread, NULL, reader, NULL);
     pthread_create(&analyzer_thread, NULL, analyzer, NULL);
     pthread_create(&printer_thread, NULL, printer, NULL);
+    pthread_create(&watchdog_thread, NULL, watchdog, NULL);
 
+    sem_post(&sem_read);
     pthread_join(reader_thread, NULL);
     pthread_join(analyzer_thread, NULL);
     pthread_join(printer_thread, NULL);
+    pthread_join(watchdog_thread, NULL);
 
-return 0;
+    sem_destroy(&sem_read);
+    sem_destroy(&sem_analyze);
+    sem_destroy(&sem_print);
+
+    return 0;
 
 }
+
