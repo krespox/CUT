@@ -85,7 +85,7 @@ double avg_cpu = 0;
 while (1){
     sem_wait(&sem_print);
 
-    for( int i =1; i<=core_amount;i++){
+    for( int i = 1; i < core_amount; i++){
         avg_cpu += core_usage[i];
     }
     avg_cpu /= (double)core_amount;
