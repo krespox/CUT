@@ -1,9 +1,10 @@
 #ifndef MAIN_H
 #define MAIN_H
 
-void term();
-void* reader();
-void* analyzer();
-void* printer();
+static void term(int signo);
+void* reader(void* unused);
+void* analyzer(void* unused);
+void* printer(void* unused);
+static void* watchdog(void* unused);
 
 #endif
